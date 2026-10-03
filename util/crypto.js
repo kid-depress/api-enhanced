@@ -152,7 +152,12 @@ const decrypt = (cipher) => {
 }
 
 const aesEcbEncrypt = (key, plaintext) => {
-  const cipher = crypto.createCipheriv(`aes-${key.length * 8}-ecb`, key, null)
+  // 某些运行时不允许使用 null 作为 IV，因此使用 Buffer.alloc(0) ,同时与上下文deriveX25519AesKey等函数保持一致
+  const cipher = crypto.createCipheriv(
+    `aes-${key.length * 8}-ecb`,
+    key,
+    Buffer.alloc(0),
+  )
   return Buffer.concat([cipher.update(Buffer.from(plaintext)), cipher.final()])
 }
 
@@ -160,7 +165,7 @@ const aesEcbDecrypt = (key, ciphertext) => {
   const decipher = crypto.createDecipheriv(
     `aes-${key.length * 8}-ecb`,
     key,
-    null,
+    Buffer.alloc(0),
   )
   return Buffer.concat([decipher.update(ciphertext), decipher.final()])
 }
@@ -201,9 +206,19 @@ const xeapiMidTransform = (ciphertext) => {
   for (let i = 0; i < ciphertext.length; i++) {
     xored[i] = ciphertext[i] ^ random[i & 0x0f]
   }
-  const b64 = Buffer.from(xored.toString('base64'))
-  const rot = b64.length ? (random[0] & 0x0f) % b64.length : 0
-  return Buffer.concat([random, b64.subarray(rot), b64.subarray(0, rot)])
+  const rot = xored.length ? (random[0] & 0x0f) % xored.length : 0
+  return Buffer.concat([random, xored.subarray(rot), xored.subarray(0, rot)])
+}
+
+const decoder = new TextDecoder('utf-8', { fatal: true })
+
+const isUtf8 = (buf) => {
+  try {
+    decoder.decode(buf)
+    return true
+  } catch {
+    return false
+  }
 }
 
 const xeapiEncryptS = (dynamicKey, publicKeyState, os) => {
@@ -246,7 +261,13 @@ const buildXeapiPlaintext = (uri, data, options = {}) => {
     const bodyData = { ...data }
     delete bodyData.e_r
     const body = Buffer.from(new URLSearchParams(bodyData).toString())
-    fields.body = body.toString('base64')
+    if (body.length) {
+      if (mediaType === 'application/x-www-form-urlencoded' && isUtf8(body)) {
+        fields.content = body.toString('utf8')
+      } else {
+        fields.body = body.toString('base64')
+      }
+    }
   }
 
   if (fields.queryString) {
@@ -269,7 +290,7 @@ const xeapi = (uri, data, options = {}) => {
   const dynamicKey = activeSessionKey || crypto.randomBytes(16)
   const plaintext = Buffer.from(buildXeapiPlaintext(uri, data, options))
 
-  const b = aesEcbEncrypt(
+  const c = aesEcbEncrypt(
     dynamicKey,
     xeapiMidTransform(aesEcbEncrypt(xeapiStaticKey, plaintext)),
   )
@@ -282,7 +303,7 @@ const xeapi = (uri, data, options = {}) => {
   )
 
   return {
-    B: b.toString('base64'),
+    C: c.toString('base64url'),
     S: s.toString('base64'),
     R: r.toString('base64'),
   }
